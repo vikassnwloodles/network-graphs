@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3D TikTok Network with Search</title>
+<style>
+  body { margin: 0; background: #222; font-family: sans-serif; }
+  #controls {
+    position: absolute;
+    z-index: 10;
+    margin: 10px;
+  }
+  #searchBox {
+    padding: 5px;
+    font-size: 14px;
+  }
+  #tooltip {
+    position: absolute;
+    background: rgba(0,0,0,0.8);
+    color: #fff;
+    padding: 5px 10px;
+    border-radius: 4px;
+    pointer-events: none;
+    display: none;
+    font-size: 12px;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <input type="text" id="searchBox" placeholder="Search node..." />
+</div>
+<div id="tooltip"></div>
+
+<script src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@r146/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/gh/mrdoob/three.js@r146/examples/js/controls/OrbitControls.js"></script>
+
+<script>
+let scene, camera, renderer, controls;
+let nodes = [], edges = [];
+let nodeMap = {};
+let raycaster = new THREE.Raycaster();
+let mouse = new THREE.Vector2();
+let selectedNode = null;
+let offset = new THREE.Vector3();
+let plane = new THREE.Plane();
+let tooltip = document.getElementById('tooltip');
+
+function init() {
+  scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x222222);
+
+  camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+  camera.position.z = 50;
+
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  document.body.appendChild(renderer.domElement);
+
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+
+  window.addEventListener('mousedown', onMouseDown, false);
+  window.addEventListener('mousemove', onMouseMove, false);
+  window.addEventListener('mouseup', onMouseUp, false);
+
+  document.getElementById('searchBox').addEventListener('input', onSearch);
+}
+
+// Force-Directed Simulation Parameters
+const repulsion = 0.5;
+const attraction = 0.01;
+const damping = 0.85;
+
+function createGraph(csvNodes, csvEdges) {
+  // Compute node degrees
+  let degreeMap = {};
+  csvEdges.forEach(e => {
+    degreeMap[e.source] = (degreeMap[e.source] || 0) + 1;
+    degreeMap[e.target] = (degreeMap[e.target] || 0) + 1;
+  });
+
+  // Top 10 nodes
+  let topNodes = Object.entries(degreeMap)
+    .sort((a,b)=>b[1]-a[1])
+    .slice(0,10)
+    .map(d=>d[0]);
+
+  nodes = csvNodes.map(name => ({
+    name,
+    pos: new THREE.Vector3(Math.random()*20-10, Math.random()*20-10, Math.random()*20-10),
+    vel: new THREE.Vector3(),
+    mesh: null,
+    degree: degreeMap[name] || 0,
+    isTop: topNodes.includes(name)
+  }));
+
+  nodeMap = {};
+  nodes.forEach(n => nodeMap[n.name] = n);
+
+  edges = csvEdges.map(e => ({
+    source: nodeMap[e.source],
+    target: nodeMap[e.target],
+    line: null
+  }));
+
+  // Create node meshes
+  nodes.forEach(n => {
+    const color = n.isTop ? 0xff5733 : 0x33ffc7;
+    const sphere = new THREE.Mesh(
+      new THREE.SphereGeometry(n.isTop ? 1.0 : 0.5, 16, 16),
+      new THREE.MeshBasicMaterial({ color })
+    );
+    sphere.position.copy(n.pos);
+    scene.add(sphere);
+    n.mesh = sphere;
+  });
+
+  // Create edges
+  edges.forEach(e => {
+    const geometry = new THREE.BufferGeometry().setFromPoints([e.source.pos, e.target.pos]);
+    const line = new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0x888888 }));
+    scene.add(line);
+    e.line = line;
+  });
+}
+
+// --- Simulation ---
+function simulate() {
+  nodes.forEach((n, i) => {
+    if (n === selectedNode) return;
+
+    nodes.forEach((m, j) => {
+      if (i === j) return;
+      const diff = new THREE.Vector3().subVectors(n.pos, m.pos);
+      const dist = Math.max(diff.length(), 0.1);
+      const force = repulsion / (dist*dist);
+      diff.normalize().multiplyScalar(force);
+      n.vel.add(diff);
+    });
+  });
+
+  edges.forEach(e => {
+    if (e.source === selectedNode || e.target === selectedNode) return;
+    const diff = new THREE.Vector3().subVectors(e.target.pos, e.source.pos).multiplyScalar(attraction);
+    e.source.vel.add(diff);
+    e.target.vel.sub(diff);
+  });
+
+  nodes.forEach(n => {
+    if (n === selectedNode) return;
+    n.vel.multiplyScalar(damping);
+    n.pos.add(n.vel);
+    n.mesh.position.copy(n.pos);
+  });
+
+  edges.forEach(e => {
+    e.line.geometry.setFromPoints([e.source.pos, e.target.pos]);
+  });
+}
+
+// --- Dragging ---
+function onMouseDown(event) {
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  const intersects = raycaster.intersectObjects(nodes.map(n => n.mesh));
+  if (intersects.length > 0) {
+    controls.enabled = false;
+    selectedNode = nodes.find(n => n.mesh === intersects[0].object);
+
+    plane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(plane.normal), selectedNode.pos);
+    const intersection = new THREE.Vector3();
+    raycaster.ray.intersectPlane(plane, intersection);
+    offset.copy(intersection).sub(selectedNode.pos);
+  }
+}
+
+function onMouseMove(event) {
+  mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+  mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+
+  // Tooltip hover
+  const intersects = raycaster.intersectObjects(nodes.map(n => n.mesh));
+  if (intersects.length > 0) {
+    const node = nodes.find(n => n.mesh === intersects[0].object);
+    tooltip.style.display = 'block';
+    tooltip.style.left = event.clientX + 5 + 'px';
+    tooltip.style.top = event.clientY + 5 + 'px';
+    tooltip.innerHTML = `<b>${node.name}</b><br>Connections: ${node.degree}`;
+  } else {
+    tooltip.style.display = 'none';
+  }
+
+  // Dragging
+  if (!selectedNode) return;
+  const intersection = new THREE.Vector3();
+  raycaster.ray.intersectPlane(plane, intersection);
+  selectedNode.pos.copy(intersection.sub(offset));
+  selectedNode.mesh.position.copy(selectedNode.pos);
+}
+
+function onMouseUp() {
+  selectedNode = null;
+  controls.enabled = true;
+}
+
+function animate() {
+  requestAnimationFrame(animate);
+  simulate();
+  controls.update();
+  renderer.render(scene, camera);
+}
+
+// --- Search ---
+function onSearch(event) {
+  const searchValue = event.target.value.trim();
+  nodes.forEach(n => {
+    if (searchValue && n.name.toLowerCase() === searchValue.toLowerCase()) {
+      n.mesh.material.color.set(0xffff00); // Highlight in yellow
+    } else {
+      n.mesh.material.color.set(n.isTop ? 0xff5733 : 0x33ffc7);
+    }
+  });
+}
+
+init();
+animate();
+
+// --- Load CSV from path ---
+const csvPath = 'tiktok_hashtag_edges.csv'; // <-- Put your CSV file path here
+fetch(csvPath)
+  .then(res => res.text())
+  .then(text => {
+    const lines = text.split(/\r?\n/).filter(l => l.trim() !== '');
+    const header = lines[0].split(',');
+    const sourceIndex = header.indexOf('Source Hashtag');
+    const targetIndex = header.indexOf('Related Hashtag');
+
+    const nodesSet = new Set();
+    const edgesArr = [];
+
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',');
+      if (!cols[sourceIndex] || !cols[targetIndex]) continue;
+      const source = cols[sourceIndex].trim();
+      const target = cols[targetIndex].trim();
+      nodesSet.add(source);
+      nodesSet.add(target);
+      edgesArr.push({ source, target });
+    }
+
+    createGraph(Array.from(nodesSet), edgesArr);
+  })
+  .catch(err => console.error("Failed to load CSV:", err));
+</script>
+</body>
+</html>
